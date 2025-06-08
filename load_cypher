@@ -1,0 +1,75 @@
+LOAD CSV WITH HEADERS FROM 'file:///condition.csv' AS row
+WITH trim(row.Condition)  AS condTxt, 'ACR_BATCH_1' AS gid
+WHERE condTxt <> ''
+MERGE (c:Condition {id: condTxt})
+  ON CREATE SET c.gid = gid;
+
+
+  // ---- load Variant + link to Condition -----------------------------
+LOAD CSV WITH HEADERS FROM 'file:///variants.csv' AS row
+WITH row
+WHERE trim(row.cond_id) <> '' AND trim(row.variant) <> ''
+
+MERGE (cond:Condition {id: trim(row.cond_id)})
+
+MERGE (var:Variant {id: trim(row.variant)})          // key on the text itself
+  ON CREATE SET var.description = row.variant,       // redundant but handy
+                var.gid        = 'ACR_BATCH_1'
+
+MERGE (cond)-[:HAS_VARIANT]->(var);
+
+
+
+////////////////////////////////////////////////////////////////////////////
+// parameters (edit only these two)
+:param file => 'file:///variant_proc.csv';    // path in /import
+:param gid  => 'ACR_BATCH_1';                 // same batch-ID as before
+////////////////////////////////////////////////////////////////////////////
+
+LOAD CSV WITH HEADERS FROM 'file:///variant_proc.csv' AS row FIELDTERMINATOR '|'
+
+WITH row, $gid AS gid,
+     trim(row.var_id)        AS varKey,
+     trim(row.proc_id)       AS procKey,
+     trim(row.category)      AS catTxt,
+     row.adult_rrl_scale     AS adultScale,
+     row.adult_rrl_dosage    AS adultDose,
+     row.peds_rrl_scale      AS pedsScale,        // <— now included
+     row.peds_rrl_dosage     AS pedsDose,         // <— now included
+
+     CASE trim(row.category)
+          WHEN 'Usually appropriate'      THEN 'USUALLY_APPROPRIATE'
+          WHEN 'May be appropriate'       THEN 'MAY_BE_APPROPRIATE'
+          WHEN 'Usually not appropriate'  THEN 'USUALLY_NOT_APPROPRIATE'
+          ELSE                                 'UNSPECIFIED'
+     END AS relType
+
+
+MERGE (var:Variant {id: varKey})
+
+MERGE (proc:Procedure {id: procKey})
+  ON CREATE SET
+      proc.gid               = gid,
+      proc.adult_rrl_scale    = adultScale,
+      proc.adult_rrl_dosage   = adultDose,
+      proc.peds_rrl_scale     = pedsScale,     // new
+      proc.peds_rrl_dosage    = pedsDose       // new
+
+
+FOREACH (_ IN CASE relType WHEN 'USUALLY_APPROPRIATE' THEN [1] ELSE [] END |
+    MERGE (var)-[r:USUALLY_APPROPRIATE]->(proc)
+    SET   r.category = catTxt
+)
+
+FOREACH (_ IN CASE relType WHEN 'MAY_BE_APPROPRIATE' THEN [1] ELSE [] END |
+    MERGE (var)-[r:MAY_BE_APPROPRIATE]->(proc)
+    SET   r.category = catTxt
+)
+
+FOREACH (_ IN CASE relType WHEN 'USUALLY_NOT_APPROPRIATE' THEN [1] ELSE [] END |
+    MERGE (var)-[r:USUALLY_NOT_APPROPRIATE]->(proc)
+    SET   r.category = catTxt
+)
+
+/* ------------------------------------------------------------------ */
+RETURN count(*) AS variant_proc_rows_loaded;
